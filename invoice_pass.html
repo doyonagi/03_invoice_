@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>請求書作成（アーティスト向け）</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:'Hiragino Sans','Yu Gothic',Meiryo,sans-serif; background:#f3f4f6; }
+input:focus,textarea:focus,select:focus { border-color:#374151!important; outline:none; }
+input[type=number] { text-align:right; }
+@media print { .no-print{display:none!important} body{background:#fff} @page{margin:15mm} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const ADMIN_PASSWORD  = "admin1234"; // ← 変更してください
+const KEY_SUBMISSIONS = "invoice_submissions";
+const KEY_TEMPLATES   = "invoice_templates";
+const WITHHOLDING_RATE = 0.1021;
+
+const uid  = () => Math.random().toString(36).slice(2,8);
+const fmt  = n  => Number(n||0).toLocaleString("ja-JP");
+const blankItem = () => ({id:uid(),name:"",qty:1,unit:"回",price:"",withholding:false});
+
+const loadLS  = (k,fb=[]) => { try{ return JSON.parse(localStorage.getItem(k)||"null")||fb; }catch{ return fb; } };
+const saveLS  = (k,v) => localStorage.setItem(k,JSON.stringify(v));
+
+const STATUS_LABEL = {pending:"未確認",approved:"承認済",rejected:"却下"};
+const STATUS_COLOR = {pending:"#d97706",approved:"#16a34a",rejected:"#dc2626"};
+const STATUS_BG    = {pending:"#fef3c7",approved:"#dcfce7",rejected:"#fee2e2"};
+
+const s = {
+  page : {background:"#f3f4f6",minHeight:"100vh",padding:24},
+  card : {background:"#fff",border:"1px solid #d1d5db",borderRadius:4,padding:20,marginBottom:14},
+  sec  : {fontSize:11,fontWeight:700,color:"#374151",borderBottom:"2px solid #1f2937",paddingBottom:5,marginBottom:14,letterSpacing:1},
+  lbl  : {display:"block",fontSize:11,fontWeight:600,color:"#6b7280",marginBottom:3},
+  inp  : {width:"100%",padding:"7px 9px",border:"1px solid #d1d5db",borderRadius:3,fontSize:13,boxSizing:"border-box"},
+  g2   : {display:"grid",gridTemplateColumns:"1fr 1fr",gap:14},
+  g3   : {display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12},
+  btn  : (bg="#1f2937",color="#fff") => ({background:bg,color,border:"none",borderRadius:3,padding:"7px 16px",cursor:"pointer",fontSize:13,fontWeight:600}),
+  btnO : (color="#374151") => ({background:"#fff",color,border:`1px solid #d1d5db`,borderRadius:3,padding:"7px 14px",cursor:"pointer",fontSize:13}),
+};
+const F = ({label,children}) => <div><span style={s.lbl}>{label}</span>{children}</div>;
+
+// ── 電子印鑑 ──
+function Hanko({realName}) {
+  if(!realName) return null;
+  const sei=realName.replace(/　| /g," ").split(" ")[0]||realName;
+  const chars=[...sei], size=chars.length<=2?52:56;
+  const cx=size/2,cy=size/2,r=size/2-3;
+  const fs=chars.length===1?22:chars.length===2?18:chars.length===3?13:11;
+  const lh=fs+2,totalH=chars.length*lh,startY=cy-totalH/2+lh/2+1;
+  return (
+    <svg width={size} height={size} style={{display:"inline-block",verticalAlign:"middle"}}>
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#c0392b" strokeWidth="2"/>
+      <circle cx={cx} cy={cy} r={r-3} fill="none" stroke="#c0392b" strokeWidth="0.8" opacity="0.4"/>
+      {chars.map((ch,i)=>(
+        <text key={i} x={cx} y={startY+i*lh} textAnchor="middle" dominantBaseline="middle"
+          fontSize={fs} fontWeight="bold" fill="#c0392b"
+          fontFamily="'Hiragino Mincho Pro','Yu Mincho',serif">{ch}</text>
+      ))}
+    </svg>
+  );
+}
+
+// ── 請求書プレビュー ──
+function InvoicePreview({f,items,onBack}) {
+  const sub  = items.reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+  const wBase= items.filter(i=>i.withholding).reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+  const wTax = Math.floor(wBase*WITHHOLDING_RATE);
+  const total= sub-wTax;
+  const tdL={padding:"5px 8px",borderBottom:"1px solid #e5e7eb"};
+  const tdR={...tdL,textAlign:"right"};
+  return (
+    <div style={{fontFamily:"'Hiragino Sans','Yu Gothic',Meiryo,sans-serif",maxWidth:720,margin:"0 auto",padding:"32px 40px",background:"#fff",fontSize:12,color:"#111"}}>
+      <div className="no-print" style={{marginBottom:16,display:"flex",gap:8}}>
+        {onBack&&<button onClick={onBack} style={s.btnO()}>← 戻る</button>}
+        <button onClick={()=>window.print()} style={s.btn()}>🖨 印刷 / PDF保存</button>
+      </div>
+      <h1 style={{textAlign:"center",fontSize:22,fontWeight:900,letterSpacing:10,borderBottom:"2px solid #111",paddingBottom:10,marginBottom:20}}>請　求　書</h1>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:20}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:800,borderBottom:"1px solid #111",paddingBottom:3,marginBottom:6}}>{f.toName} 御中</div>
+          <div style={{marginBottom:12}}>下記の通りご請求申し上げます。</div>
+          <table style={{fontSize:12,borderCollapse:"collapse"}}><tbody>
+            <tr><td style={{paddingRight:12,color:"#555",fontWeight:600}}>件名</td><td>{f.subject}</td></tr>
+            <tr><td style={{paddingRight:12,color:"#555",fontWeight:600}}>支払い期限</td><td>{f.dueDate}</td></tr>
+          </tbody></table>
+        </div>
+        <div style={{textAlign:"right",lineHeight:1.9}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:8}}>
+            <div style={{fontWeight:700}}>{f.realName}{f.artistName?`（${f.artistName}）`:""}</div>
+            <Hanko realName={f.realName}/>
+            <span style={{fontSize:11,color:"#888"}}>(印)</span>
+          </div>
+          {f.addr&&<div style={{color:"#555"}}>{f.addr}</div>}
+          {f.tel&&<div>{f.tel}</div>}
+          <div style={{marginTop:6,color:"#555"}}>発行日　{f.date}</div>
+          {f.invoiceNo&&<div style={{color:"#555"}}>No. {f.invoiceNo}</div>}
+        </div>
+      </div>
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:12,border:"1px solid #d1d5db"}}>
+        <tbody>
+          <tr style={{background:"#f3f4f6"}}>
+            <td style={{padding:"10px 16px",fontWeight:700,fontSize:14,border:"1px solid #d1d5db",width:80}}>合計</td>
+            <td style={{padding:"10px 16px",fontWeight:900,fontSize:22,border:"1px solid #d1d5db"}}>{fmt(total)} <span style={{fontSize:14}}>円</span></td>
+            <td style={{border:"1px solid #d1d5db"}} colSpan={3}></td>
+          </tr>
+          <tr style={{background:"#1f2937",color:"#fff"}}>
+            {["摘要","数量","単位","単価","金額"].map((h,i)=>(
+              <th key={h} style={{padding:"6px 8px",textAlign:i>0?"right":"left",fontWeight:600,border:"1px solid #374151"}}>{h}</th>
+            ))}
+          </tr>
+          {items.filter(i=>i.name||i.price).map((item,idx)=>{
+            const amt=(Number(item.price)||0)*(Number(item.qty)||0);
+            return (
+              <tr key={item.id} style={{background:idx%2===0?"#f9fafb":"#fff"}}>
+                <td style={tdL}>{item.name}{item.withholding&&<span style={{color:"#6b7280",fontSize:10}}> ※源泉対象</span>}</td>
+                <td style={tdR}>{item.qty}</td><td style={tdR}>{item.unit}</td>
+                <td style={tdR}>{fmt(item.price)}</td><td style={tdR}>{fmt(amt)}</td>
+              </tr>
+            );
+          })}
+          {Array(Math.max(0,8-items.filter(i=>i.name||i.price).length)).fill(0).map((_,i)=>(
+            <tr key={"e"+i} style={{background:i%2===0?"#f9fafb":"#fff"}}>
+              {[...Array(5)].map((__,j)=><td key={j} style={{...tdL,height:24}}></td>)}
+            </tr>
+          ))}
+          <tr><td colSpan={4} style={{...tdR,fontWeight:600,background:"#f3f4f6"}}>小計</td><td style={{...tdR,fontWeight:600,background:"#f3f4f6"}}>{fmt(sub)}</td></tr>
+          <tr><td colSpan={4} style={{...tdR,color:"#555",background:"#f3f4f6"}}>源泉徴収 天引き</td><td style={{...tdR,background:"#f3f4f6"}}>{fmt(wTax)}</td></tr>
+          <tr style={{borderTop:"2px solid #1f2937"}}>
+            <td colSpan={4} style={{...tdR,fontWeight:800,fontSize:14}}>合計</td>
+            <td style={{...tdR,fontWeight:800,fontSize:14}}>{fmt(total)}</td>
+          </tr>
+        </tbody>
+      </table>
+      {wBase>0&&<div style={{fontSize:11,color:"#555",marginBottom:16}}>源泉徴収税　10.21%　{fmt(wBase)}　{fmt(wTax)}</div>}
+      <table style={{width:"100%",borderCollapse:"collapse",border:"1px solid #d1d5db",marginBottom:12}}>
+        <thead><tr style={{background:"#1f2937",color:"#fff"}}>
+          <th colSpan={4} style={{padding:"6px 10px",textAlign:"center",fontWeight:700}}>振込先</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td style={{...tdL,width:90,color:"#555",background:"#f9fafb"}}>銀行名</td><td style={tdL}>{f.bankName}</td>
+            <td style={{...tdL,width:90,color:"#555",background:"#f9fafb"}}>支店名</td>
+            <td style={tdL}>{f.branchName}{f.branchCode?`　支店番号 ${f.branchCode}`:""}</td>
+          </tr>
+          <tr>
+            <td style={{...tdL,color:"#555",background:"#f9fafb"}}>口座種別</td><td style={tdL}>{f.accountType}口座</td>
+            <td style={{...tdL,color:"#555",background:"#f9fafb"}}>口座番号</td><td style={tdL}>{f.accountNo}</td>
+          </tr>
+          <tr>
+            <td style={{...tdL,color:"#555",background:"#f9fafb"}}>口座名義</td><td colSpan={3} style={tdL}>{f.accountHolder}</td>
+          </tr>
+        </tbody>
+      </table>
+      {f.notes&&<div style={{padding:10,border:"1px solid #e5e7eb",background:"#f9fafb",fontSize:12,whiteSpace:"pre-wrap"}}><b>備考</b>　{f.notes}</div>}
+    </div>
+  );
+}
+
+// ── テンプレート管理（管理者用タブ） ──
+function TemplateAdmin() {
+  const [templates, setTemplates] = useState(()=>loadLS(KEY_TEMPLATES,[]));
+  const [editing, setEditing]   = useState(null); // null | {id,name,form,items}
+  const [newName, setNewName]   = useState("");
+
+  const save = (list) => { saveLS(KEY_TEMPLATES,list); setTemplates(list); };
+
+  function startNew() {
+    setEditing({
+      id: uid(), name:"",
+      form:{ invoiceNo:"",date:"",dueDate:"",realName:"",artistName:"",addr:"",tel:"",
+             toName:"合同会社03",subject:"",bankName:"",branchName:"",branchCode:"",
+             accountType:"普通",accountNo:"",accountHolder:"",notes:"" },
+      items:[blankItem()],
+    });
+  }
+
+  function saveTemplate(tpl) {
+    if(!tpl.name.trim()){ alert("テンプレート名を入力してください"); return; }
+    const list = templates.find(t=>t.id===tpl.id)
+      ? templates.map(t=>t.id===tpl.id?tpl:t)
+      : [...templates, tpl];
+    save(list); setEditing(null);
+  }
+
+  function del(id) {
+    if(!confirm("このテンプレートを削除しますか？")) return;
+    save(templates.filter(t=>t.id!==id));
+  }
+
+  if(editing) return <TemplateEditor tpl={editing} onSave={saveTemplate} onCancel={()=>setEditing(null)}/>;
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <p style={{fontSize:12,color:"#6b7280"}}>{templates.length} 件のテンプレート</p>
+        <button onClick={startNew} style={s.btn()}>＋ 新規テンプレート</button>
+      </div>
+      {templates.length===0 ? (
+        <div style={{...s.card,textAlign:"center",color:"#9ca3af",padding:40}}>
+          テンプレートがまだありません。「新規テンプレート」から作成してください。
+        </div>
+      ) : (
+        <div style={s.card}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr style={{borderBottom:"2px solid #1f2937"}}>
+                {["テンプレート名","宛名","品目数","操作"].map(h=>(
+                  <th key={h} style={{padding:"8px 10px",textAlign:"left",fontSize:11,fontWeight:700,color:"#374151"}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((t,idx)=>(
+                <tr key={t.id} style={{borderBottom:"1px solid #e5e7eb",background:idx%2===0?"#f9fafb":"#fff"}}>
+                  <td style={{padding:"10px",fontWeight:700}}>{t.name}</td>
+                  <td style={{padding:"10px",color:"#6b7280"}}>{t.form.toName||"—"}</td>
+                  <td style={{padding:"10px",color:"#6b7280"}}>{t.items.length} 件</td>
+                  <td style={{padding:"10px"}}>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>setEditing(t)} style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:3,padding:"4px 10px",cursor:"pointer",fontSize:12,color:"#16a34a"}}>編集</button>
+                      <button onClick={()=>del(t.id)} style={{background:"#fff",border:"1px solid #fca5a5",borderRadius:3,padding:"4px 10px",cursor:"pointer",fontSize:12,color:"#dc2626"}}>削除</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── テンプレート編集フォーム ──
+function TemplateEditor({tpl, onSave, onCancel}) {
+  const [name,  setName]  = useState(tpl.name);
+  const [form,  setForm]  = useState(tpl.form);
+  const [items, setItems] = useState(tpl.items);
+
+  const upd = (k,v) => setForm(p=>({...p,[k]:v}));
+  const updItem = (id,k,v) => setItems(p=>p.map(i=>i.id===id?{...i,[k]:v}:i));
+  const inp = (val,onChange,ph="",type="text") => (
+    <input style={s.inp} type={type} value={val} onChange={e=>onChange(e.target.value)} placeholder={ph}/>
+  );
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{fontSize:15,fontWeight:700}}>{tpl.name?"テンプレートを編集":"新規テンプレート"}</h3>
+        <button onClick={onCancel} style={s.btnO()}>キャンセル</button>
+      </div>
+
+      {/* テンプレート名 */}
+      <div style={s.card}>
+        <div style={s.sec}>テンプレート名</div>
+        <input style={{...s.inp,fontSize:15,fontWeight:600}} value={name} onChange={e=>setName(e.target.value)} placeholder="例：出演費（大阪）"/>
+      </div>
+
+      {/* 請求先・件名 */}
+      <div style={s.card}>
+        <div style={s.sec}>固定値（毎回同じ値を設定）</div>
+        <div style={s.g2}>
+          <F label="請求先（宛名）">{inp(form.toName,v=>upd("toName",v),"合同会社〇〇")}</F>
+          <F label="件名（ひな形）">{inp(form.subject,v=>upd("subject",v),"〇月〇日 [イベント名] 出演費")}</F>
+          <F label="銀行名">{inp(form.bankName,v=>upd("bankName",v),"ゆうちょ銀行")}</F>
+          <F label="支店名">{inp(form.branchName,v=>upd("branchName",v),"〇〇支店")}</F>
+          <F label="支店番号">{inp(form.branchCode,v=>upd("branchCode",v),"058")}</F>
+          <F label="口座種別">
+            <select value={form.accountType} onChange={e=>upd("accountType",e.target.value)} style={s.inp}>
+              <option>普通</option><option>当座</option><option>貯蓄</option>
+            </select>
+          </F>
+          <F label="口座番号">{inp(form.accountNo,v=>upd("accountNo",v),"1234567")}</F>
+          <F label="口座名義（カタカナ）">{inp(form.accountHolder,v=>upd("accountHolder",v),"ヤマダ タロウ")}</F>
+        </div>
+      </div>
+
+      {/* 品目 */}
+      <div style={s.card}>
+        <div style={s.sec}>品目テンプレート</div>
+        <div style={{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 1.5fr 80px auto",gap:6,marginBottom:6}}>
+          {["品目名","数量","単位","単価（円）","源泉対象",""].map((h,i)=>(
+            <span key={i} style={{fontSize:11,fontWeight:600,color:"#6b7280",textAlign:i===4?"center":"left"}}>{h}</span>
+          ))}
+        </div>
+        {items.map(item=>(
+          <div key={item.id} style={{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 1.5fr 80px auto",gap:6,marginBottom:6,alignItems:"center"}}>
+            <input style={s.inp} value={item.name} onChange={e=>updItem(item.id,"name",e.target.value)} placeholder="品目名"/>
+            <input style={s.inp} type="number" value={item.qty} onChange={e=>updItem(item.id,"qty",e.target.value)}/>
+            <input style={s.inp} value={item.unit} onChange={e=>updItem(item.id,"unit",e.target.value)} placeholder="回"/>
+            <input style={s.inp} type="number" value={item.price} onChange={e=>updItem(item.id,"price",e.target.value)} placeholder="0"/>
+            <div style={{textAlign:"center"}}>
+              <input type="checkbox" checked={item.withholding} onChange={e=>updItem(item.id,"withholding",e.target.checked)} style={{width:16,height:16,cursor:"pointer"}}/>
+            </div>
+            <button onClick={()=>setItems(p=>p.filter(i=>i.id!==item.id))} style={{background:"#fff",border:"1px solid #d1d5db",borderRadius:3,padding:"6px 9px",cursor:"pointer",color:"#9ca3af"}}>✕</button>
+          </div>
+        ))}
+        <button onClick={()=>setItems(p=>[...p,blankItem()])} style={{marginTop:6,width:"100%",padding:"8px",border:"1px dashed #d1d5db",borderRadius:3,background:"#f9fafb",cursor:"pointer",fontSize:13,color:"#374151"}}>
+          ＋ 品目を追加
+        </button>
+      </div>
+
+      <button onClick={()=>onSave({...tpl,name,form,items})} style={{...s.btn(),width:"100%",padding:"11px",fontSize:14,marginBottom:24}}>
+        💾 テンプレートを保存
+      </button>
+    </div>
+  );
+}
+
+// ── 管理画面（タブつき） ──
+function AdminPage({onLogout}) {
+  const [tab, setTab]       = useState("submissions"); // "submissions" | "templates"
+  const [submissions, setSubs] = useState(()=>loadLS(KEY_SUBMISSIONS,[]));
+  const [viewing, setViewing]  = useState(null);
+  const [editing, setEditing]  = useState(null);
+
+  const refresh = () => setSubs(loadLS(KEY_SUBMISSIONS,[]));
+
+  function updateStatus(id,status) {
+    const list = loadLS(KEY_SUBMISSIONS,[]).map(s=>s.id===id?{...s,status}:s);
+    saveLS(KEY_SUBMISSIONS,list); refresh();
+  }
+  function del(id) {
+    if(!confirm("削除しますか？")) return;
+    saveLS(KEY_SUBMISSIONS,loadLS(KEY_SUBMISSIONS,[]).filter(s=>s.id!==id)); refresh();
+  }
+  function saveEdit(updated) {
+    const list = loadLS(KEY_SUBMISSIONS,[]).map(s=>s.id===updated.id?updated:s);
+    saveLS(KEY_SUBMISSIONS,list); refresh(); setEditing(null);
+  }
+
+  if(viewing) return <div style={s.page}><InvoicePreview f={viewing.form} items={viewing.items} onBack={()=>setViewing(null)}/></div>;
+  if(editing)  return (
+    <div style={s.page}><div style={{maxWidth:720,margin:"0 auto"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+        <h2 style={{fontSize:16,fontWeight:800}}>請求書を編集</h2>
+        <button onClick={()=>setEditing(null)} style={s.btnO()}>← キャンセル</button>
+      </div>
+      <InvoiceForm initialForm={editing.form} initialItems={editing.items} isAdmin
+        onSubmit={(form,items)=>saveEdit({...editing,form,items,updatedAt:new Date().toISOString()})}
+        submitLabel="変更を保存"/>
+    </div></div>
+  );
+
+  const tabStyle = (active) => ({
+    padding:"8px 20px", cursor:"pointer", fontSize:13, fontWeight:600,
+    borderBottom: active?"3px solid #1f2937":"3px solid transparent",
+    color: active?"#111":"#9ca3af", background:"none", border:"none",
+    borderBottom: active?"3px solid #1f2937":"3px solid transparent",
+  });
+
+  return (
+    <div style={s.page}>
+      <div style={{maxWidth:900,margin:"0 auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <h1 style={{fontSize:18,fontWeight:800}}>管理画面</h1>
+          <button onClick={onLogout} style={s.btnO()}>ログアウト</button>
+        </div>
+
+        {/* タブ */}
+        <div style={{display:"flex",borderBottom:"1px solid #e5e7eb",marginBottom:20}}>
+          <button style={tabStyle(tab==="submissions")} onClick={()=>setTab("submissions")}>📋 請求書一覧</button>
+          <button style={tabStyle(tab==="templates")}   onClick={()=>setTab("templates")}>📁 テンプレート管理</button>
+        </div>
+
+        {tab==="submissions" && (
+          submissions.length===0 ? (
+            <div style={{...s.card,textAlign:"center",color:"#9ca3af",padding:40}}>提出された請求書はまだありません</div>
+          ) : (
+            <div style={s.card}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                <thead>
+                  <tr style={{borderBottom:"2px solid #1f2937"}}>
+                    {["提出日時","アーティスト","件名","合計","ステータス","操作"].map(h=>(
+                      <th key={h} style={{padding:"8px 10px",textAlign:"left",fontSize:11,fontWeight:700,color:"#374151"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {submissions.slice().reverse().map((sub,idx)=>{
+                    const sub2 = sub.items.reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+                    const wB   = sub.items.filter(i=>i.withholding).reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+                    const total= sub2-Math.floor(wB*WITHHOLDING_RATE);
+                    return (
+                      <tr key={sub.id} style={{borderBottom:"1px solid #e5e7eb",background:idx%2===0?"#f9fafb":"#fff"}}>
+                        <td style={{padding:"10px",color:"#6b7280",fontSize:12}}>{new Date(sub.submittedAt).toLocaleString("ja-JP",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}</td>
+                        <td style={{padding:"10px",fontWeight:600}}>
+                          {sub.form.realName}
+                          {sub.form.artistName&&<span style={{color:"#6b7280",fontSize:11,marginLeft:4}}>({sub.form.artistName})</span>}
+                        </td>
+                        <td style={{padding:"10px",color:"#374151"}}>{sub.form.subject||"—"}</td>
+                        <td style={{padding:"10px",fontWeight:700}}>¥{fmt(total)}</td>
+                        <td style={{padding:"10px"}}>
+                          <select value={sub.status} onChange={e=>updateStatus(sub.id,e.target.value)}
+                            style={{padding:"4px 8px",borderRadius:20,border:"none",fontSize:12,fontWeight:700,
+                              background:STATUS_BG[sub.status],color:STATUS_COLOR[sub.status],cursor:"pointer"}}>
+                            {Object.entries(STATUS_LABEL).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                          </select>
+                        </td>
+                        <td style={{padding:"10px"}}>
+                          <div style={{display:"flex",gap:6}}>
+                            <button onClick={()=>setViewing(sub)} style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:3,padding:"4px 10px",cursor:"pointer",fontSize:12,color:"#1d4ed8"}}>表示</button>
+                            <button onClick={()=>setEditing(sub)} style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:3,padding:"4px 10px",cursor:"pointer",fontSize:12,color:"#16a34a"}}>編集</button>
+                            <button onClick={()=>del(sub.id)} style={{background:"#fff",border:"1px solid #fca5a5",borderRadius:3,padding:"4px 10px",cursor:"pointer",fontSize:12,color:"#dc2626"}}>削除</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+
+        {tab==="templates" && <TemplateAdmin/>}
+      </div>
+    </div>
+  );
+}
+
+// ── ログイン ──
+function LoginPage({onLogin}) {
+  const [pw,setPw]=useState(""); const [err,setErr]=useState(false);
+  function tryLogin(){ if(pw===ADMIN_PASSWORD){onLogin();}else{setErr(true);setTimeout(()=>setErr(false),2000);} }
+  return (
+    <div style={{minHeight:"100vh",background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{...s.card,width:320,padding:40}}>
+        <h2 style={{fontSize:16,fontWeight:800,marginBottom:4}}>管理者ログイン</h2>
+        <p style={{fontSize:12,color:"#6b7280",marginBottom:20}}>管理者パスワードを入力してください</p>
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&tryLogin()}
+          placeholder="パスワード" style={{...s.inp,marginBottom:8,borderColor:err?"#dc2626":"#d1d5db"}}/>
+        {err&&<p style={{fontSize:12,color:"#dc2626",marginBottom:8}}>パスワードが違います</p>}
+        <button onClick={tryLogin} style={{...s.btn(),width:"100%",padding:"9px",fontSize:14}}>ログイン</button>
+      </div>
+    </div>
+  );
+}
+
+// ── 請求書フォーム（アーティスト用） ──
+function InvoiceForm({initialForm,initialItems,onSubmit,submitLabel="提出する",isAdmin=false}) {
+  const today = new Date().toISOString().slice(0,10);
+  const due   = new Date(Date.now()+9*86400000).toISOString().slice(0,10);
+
+  const [f,setF] = useState(initialForm||{
+    invoiceNo:"",date:today,dueDate:due,
+    realName:"",artistName:"",addr:"",tel:"",
+    toName:"合同会社03",subject:"",
+    bankName:"",branchName:"",branchCode:"",accountType:"普通",accountNo:"",accountHolder:"",
+    notes:"",
+  });
+  const [items,setItems] = useState(initialItems||[
+    {id:uid(),name:"",qty:1,unit:"回",price:"",withholding:true},
+    {id:uid(),name:"交通費往復",qty:1,unit:"人",price:"",withholding:false},
+  ]);
+  const [preview,  setPreview]  = useState(false);
+  const [submitted,setSubmitted]= useState(false);
+  const [templates,setTemplates]= useState(()=>loadLS(KEY_TEMPLATES,[]));
+
+  // テンプレート適用
+  function applyTemplate(tpl) {
+    if(!confirm(`「${tpl.name}」を適用しますか？現在の入力が上書きされます。`)) return;
+    setF(p=>({...p,...tpl.form}));
+    setItems(tpl.items.map(i=>({...i,id:uid()})));
+  }
+
+  const upd = (k,v) => setF(p=>({...p,[k]:v}));
+  const updItem = (id,k,v) => setItems(p=>p.map(i=>i.id===id?{...i,[k]:v}:i));
+  const sub  = items.reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+  const wBase= items.filter(i=>i.withholding).reduce((s,i)=>s+(Number(i.price)||0)*(Number(i.qty)||0),0);
+  const wTax = Math.floor(wBase*WITHHOLDING_RATE);
+  const total= sub-wTax;
+  const inp = (val,onChange,ph="",type="text") => (
+    <input style={s.inp} type={type} value={val} onChange={e=>onChange(e.target.value)} placeholder={ph}/>
+  );
+
+  function handleSubmit() {
+    if(!f.realName){alert("本名を入力してください");return;}
+    if(isAdmin){onSubmit(f,items);return;}
+    const list = loadLS(KEY_SUBMISSIONS,[]);
+    list.push({id:uid(),form:f,items,status:"pending",submittedAt:new Date().toISOString()});
+    saveLS(KEY_SUBMISSIONS,list);
+    setSubmitted(true);
+  }
+
+  if(submitted) return (
+    <div style={{minHeight:"100vh",background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{...s.card,padding:40,textAlign:"center",maxWidth:360}}>
+        <div style={{fontSize:40,marginBottom:12}}>✅</div>
+        <h2 style={{fontSize:16,fontWeight:800,marginBottom:8}}>提出しました！</h2>
+        <p style={{fontSize:13,color:"#6b7280",marginBottom:20}}>請求書が管理者に送信されました。</p>
+        <button onClick={()=>setSubmitted(false)} style={s.btn()}>新しい請求書を作成</button>
+      </div>
+    </div>
+  );
+
+  if(preview) return <div style={s.page}><InvoicePreview f={f} items={items} onBack={()=>setPreview(false)}/></div>;
+
+  return (
+    <>
+      {/* テンプレート選択（管理者が登録したものだけ表示） */}
+      {templates.length>0 && (
+        <div style={s.card}>
+          <div style={s.sec}>テンプレートから選ぶ</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {templates.map(t=>(
+              <button key={t.id} onClick={()=>applyTemplate(t)}
+                style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:20,padding:"6px 16px",cursor:"pointer",fontSize:13,color:"#1d4ed8",fontWeight:600}}>
+                {t.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={s.card}>
+        <div style={s.sec}>請求書情報</div>
+        <div style={s.g3}>
+          <F label="請求書番号（任意）">{inp(f.invoiceNo,v=>upd("invoiceNo",v),"INV-001")}</F>
+          <F label="発行日">{inp(f.date,v=>upd("date",v),"","date")}</F>
+          <F label="支払期限">{inp(f.dueDate,v=>upd("dueDate",v),"","date")}</F>
+        </div>
+        <div style={{marginTop:12,...s.g2}}>
+          <F label="請求先（宛名）">{inp(f.toName,v=>upd("toName",v),"合同会社〇〇")}</F>
+          <F label="件名">{inp(f.subject,v=>upd("subject",v),"〇月〇日 [イベント名] 出演費")}</F>
+        </div>
+      </div>
+
+      <div style={s.card}>
+        <div style={s.sec}>発行者情報（アーティスト）</div>
+        <div style={s.g2}>
+          <F label="本名（苗字 名前）">{inp(f.realName,v=>upd("realName",v),"山田 太郎")}</F>
+          <F label="アーティスト名">{inp(f.artistName,v=>upd("artistName",v),"DJ Taro")}</F>
+          <F label="住所">{inp(f.addr,v=>upd("addr",v),"東京都〇〇区...")}</F>
+          <F label="電話番号">{inp(f.tel,v=>upd("tel",v),"090-0000-0000")}</F>
+        </div>
+        {f.realName&&(
+          <div style={{marginTop:12,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:11,color:"#6b7280"}}>電子印鑑プレビュー：</span>
+            <Hanko realName={f.realName}/>
+          </div>
+        )}
+      </div>
+
+      <div style={s.card}>
+        <div style={s.sec}>品目明細</div>
+        <div style={{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 1.5fr 80px auto",gap:6,marginBottom:6}}>
+          {["品目名","数量","単位","単価（円）","源泉対象",""].map((h,i)=>(
+            <span key={i} style={{fontSize:11,fontWeight:600,color:"#6b7280",textAlign:i===4?"center":"left"}}>{h}</span>
+          ))}
+        </div>
+        {items.map(item=>(
+          <div key={item.id} style={{display:"grid",gridTemplateColumns:"3fr 1fr 1fr 1.5fr 80px auto",gap:6,marginBottom:6,alignItems:"center"}}>
+            <input style={s.inp} value={item.name} onChange={e=>updItem(item.id,"name",e.target.value)} placeholder="品目を入力"/>
+            <input style={s.inp} type="number" value={item.qty} onChange={e=>updItem(item.id,"qty",e.target.value)}/>
+            <input style={s.inp} value={item.unit} onChange={e=>updItem(item.id,"unit",e.target.value)} placeholder="回"/>
+            <input style={s.inp} type="number" value={item.price} onChange={e=>updItem(item.id,"price",e.target.value)} placeholder="0"/>
+            <div style={{textAlign:"center"}}>
+              <input type="checkbox" checked={item.withholding} onChange={e=>updItem(item.id,"withholding",e.target.checked)} style={{width:16,height:16,cursor:"pointer"}}/>
+            </div>
+            <button onClick={()=>setItems(p=>p.filter(i=>i.id!==item.id))} style={{background:"#fff",border:"1px solid #d1d5db",borderRadius:3,padding:"6px 9px",cursor:"pointer",color:"#9ca3af",fontSize:13}}>✕</button>
+          </div>
+        ))}
+        <button onClick={()=>setItems(p=>[...p,blankItem()])} style={{marginTop:6,width:"100%",padding:"8px",border:"1px dashed #d1d5db",borderRadius:3,background:"#f9fafb",cursor:"pointer",fontSize:13,color:"#374151"}}>
+          ＋ 品目を追加
+        </button>
+        <div style={{marginTop:14,borderTop:"1px solid #e5e7eb",paddingTop:12}}>
+          <table style={{marginLeft:"auto",fontSize:13,borderCollapse:"collapse",minWidth:240}}>
+            <tbody>
+              <tr><td style={{padding:"3px 10px",color:"#6b7280"}}>小計</td><td style={{textAlign:"right",padding:"3px 10px"}}>¥{fmt(sub)}</td></tr>
+              {wBase>0&&<>
+                <tr><td style={{padding:"3px 10px",color:"#6b7280"}}>源泉対象額</td><td style={{textAlign:"right",padding:"3px 10px"}}>¥{fmt(wBase)}</td></tr>
+                <tr><td style={{padding:"3px 10px",color:"#e53e3e"}}>源泉徴収（10.21%）天引き</td><td style={{textAlign:"right",padding:"3px 10px",color:"#e53e3e"}}>－¥{fmt(wTax)}</td></tr>
+              </>}
+              <tr style={{borderTop:"2px solid #1f2937",fontWeight:800}}>
+                <td style={{padding:"6px 10px"}}>合計（振込額）</td>
+                <td style={{textAlign:"right",padding:"6px 10px"}}>¥{fmt(total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={s.card}>
+        <div style={s.sec}>振込先</div>
+        <div style={s.g3}>
+          <F label="銀行名">{inp(f.bankName,v=>upd("bankName",v),"ゆうちょ銀行")}</F>
+          <F label="支店名">{inp(f.branchName,v=>upd("branchName",v),"〇〇支店")}</F>
+          <F label="支店番号（3桁）">{inp(f.branchCode,v=>upd("branchCode",v),"058")}</F>
+          <F label="口座種別">
+            <select value={f.accountType} onChange={e=>upd("accountType",e.target.value)} style={s.inp}>
+              <option>普通</option><option>当座</option><option>貯蓄</option>
+            </select>
+          </F>
+          <F label="口座番号（7桁）">{inp(f.accountNo,v=>upd("accountNo",v),"1234567")}</F>
+          <F label="口座名義（カタカナ）">{inp(f.accountHolder,v=>upd("accountHolder",v),"ヤマダ タロウ")}</F>
+        </div>
+      </div>
+
+      <div style={s.card}>
+        <div style={s.sec}>備考</div>
+        <textarea value={f.notes} onChange={e=>upd("notes",e.target.value)}
+          style={{...s.inp,resize:"vertical",minHeight:60}} placeholder="特記事項があれば..."/>
+      </div>
+
+      <div style={{display:"flex",gap:10,marginBottom:24}}>
+        <button onClick={()=>setPreview(true)} style={{...s.btnO(),flex:1,padding:"10px"}}>プレビュー確認</button>
+        <button onClick={handleSubmit} style={{...s.btn(),flex:2,padding:"10px",fontSize:14}}>{submitLabel}</button>
+      </div>
+    </>
+  );
+}
+
+// ── メインアプリ ──
+function App() {
+  const [page,setPage] = useState("form");
+  return (
+    <div>
+      {page==="form"&&(
+        <div style={s.page}>
+          <div style={{maxWidth:720,margin:"0 auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+              <h1 style={{fontSize:17,fontWeight:800,color:"#111"}}>請求書作成（アーティスト向け）</h1>
+              <button onClick={()=>setPage("adminLogin")} style={{...s.btnO("#6b7280"),fontSize:12}}>管理者ログイン</button>
+            </div>
+            <InvoiceForm/>
+          </div>
+        </div>
+      )}
+      {page==="adminLogin"&&<LoginPage onLogin={()=>setPage("admin")}/>}
+      {page==="admin"&&<AdminPage onLogout={()=>setPage("form")}/>}
+    </div>
+  );
+}
+
+ReactDOM.render(<App/>, document.getElementById('root'));
+</script>
+</body>
+</html>
